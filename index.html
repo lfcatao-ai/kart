@@ -332,7 +332,7 @@
 'use strict';
 
 /* ================= M1 CONFIG ================= */
-var VER='v2.1.0';
+var VER='v2.1.1';
 var API='https://api.github.com', OWNER='lfcatao-ai', REPO='kart', DIR='s';
 var SALT='racha-mesa-2026';
 var COL={paper:'#F2E8D5',paper2:'#EADDC3',ink:'#2B2620',asphalt:'#57534E',grass:'#8FA65A',
@@ -792,7 +792,11 @@ function inputStart(e){
       continue;
     }
     if(t.clientY<window.innerHeight*0.45){
-      if(S.mode==='GP'&&GP.on&&inputActive()) playerUseItem();
+      if(S.mode==='GP'&&GP.on&&inputActive()){
+        playerUseItem();
+        // o polegar que subiu pra usar o item não pode armar drift ao voltar
+        IN.lastEnd[0]=-1e9; IN.lastEnd[1]=-1e9;
+      }
       continue; // metade superior nunca vira steer
     }
     if(!inputActive()) continue;
@@ -1163,7 +1167,7 @@ function gpInit(tr){
   var diff=DIFFS[S.diff]||DIFFS.med;
   GP.on=true; GP.diff=diff;
   GP.fire=LS.get('racha:modFire')==='1';
-  GP.bombIdx=null;
+  GP.bombIdx=null; GP.bombPend=null; GP.bombPendT=0; GP.bombCd=0;
   buildRacingLine(tr,diff);
   GP.rng=mulberry32(xmur3(tr.seed+'#itens')());
   GP.proj=[]; GP.traps=[]; GP.boxes=[]; GP.bots=[];
@@ -1291,6 +1295,12 @@ function dropTrap(owner){
   t.on=true; t.seq=GP.trapSeq=(GP.trapSeq||0)+1;
   t.d=kD(owner)-45; if(t.d<0)t.d+=TRACK.total;
   t.lat=kLat(owner); t.owner=owner;
+}
+function bombDetonate(owner){
+  GP.bombCd=2.5; GP.bombIdx=null; GP.bombPend=null; GP.bombPendT=0;
+  // quem explodiu sai ileso e imune por 2s (não vira alvo da bomba seguinte)
+  if(owner<0){ K.immuneT=Math.max(K.immuneT,2); K.bombOn=false; }
+  else if(GP.bots[owner]) GP.bots[owner].immuneT=Math.max(GP.bots[owner].immuneT,2);
 }
 function useThunder(owner){
   var myRank=kRank(owner);
@@ -1479,19 +1489,19 @@ function gpUpdate(fdt){
       K.rank=i+1;
     } else GP.bots[e.bi].rank=i+1;
   }
-  // MOD FIRE: o último vivo é a bomba
-  GP.bombIdx=null;
+  // MOD FIRE: o último vivo ARMA em 1.2s; explosão detona 1x e entra em cooldown
   K.bombOn=false;
   if(GP.fire){
-    for(i=7;i>=0;i--){
-      var le=arr[i];
-      if(!le.fin){
-        GP.bombIdx=le.bi;
-        if(le.bi<0) K.bombOn=true;
-        break;
-      }
+    if(GP.bombCd>0){ GP.bombCd-=fdt; GP.bombIdx=null; GP.bombPend=null; }
+    else {
+      var cand=null;
+      for(i=7;i>=0;i--){ if(!arr[i].fin){ cand=arr[i].bi; break; } }
+      if(cand!==GP.bombPend){ GP.bombPend=cand; GP.bombPendT=0; }
+      else GP.bombPendT+=fdt;
+      GP.bombIdx=(cand!=null&&GP.bombPendT>=1.2)?cand:null;
     }
-  }
+    if(GP.bombIdx===-1) K.bombOn=true;
+  } else GP.bombIdx=null;
   // desvio de ultrapassagem: vizinho à frente na ordem
   for(i=1;i<8;i++){
     if(arr[i].bi<0) continue;
@@ -1591,14 +1601,18 @@ function gpUpdate(fdt){
       b=GP.bots[i];
       if(b.finished) continue;
       if(dist2(K.x,K.y,b.x,b.y)<26*26){
-        if(K.bombOn){ // MOD FIRE: bomba explode quem tocar
-          if(applyHit(i,1.2,'bomba',-1)){ b.latTgt+=(b.lat>K.lat?34:-34); }
+        if(K.bombOn){ // MOD FIRE: bomba explode quem tocar (1x, exploder ileso)
+          if(applyHit(i,1.2,'bomba',-1)){
+            b.latTgt+=(b.lat>K.lat?34:-34);
+            bombDetonate(-1);
+          }
           continue;
         }
         if(GP.bombIdx===i){
           if(applyHit(-1,1.2,'bomba',i)){
             var dxb=K.x-b.x, dyb=K.y-b.y, dlb=Math.hypot(dxb,dyb)||1;
             K.vx+=dxb/dlb*110; K.vy+=dyb/dlb*110;
+            bombDetonate(i);
           }
           camShake();
           continue;
@@ -1633,8 +1647,8 @@ function gpUpdate(fdt){
       if(arr[i].bi<0||arr[i-1].bi<0) continue;
       var b1=GP.bots[arr[i].bi], b2=GP.bots[arr[i-1].bi];
       if(Math.abs(arr[i-1].prog-arr[i].prog)<80&&dist2(b1.x,b1.y,b2.x,b2.y)<26*26){
-        if(GP.bombIdx===arr[i].bi) applyHit(arr[i-1].bi,1.2,'bomba',arr[i].bi);
-        else if(GP.bombIdx===arr[i-1].bi) applyHit(arr[i].bi,1.2,'bomba',arr[i-1].bi);
+        if(GP.bombIdx===arr[i].bi){ if(applyHit(arr[i-1].bi,1.2,'bomba',arr[i].bi)) bombDetonate(arr[i].bi); }
+        else if(GP.bombIdx===arr[i-1].bi){ if(applyHit(arr[i].bi,1.2,'bomba',arr[i-1].bi)) bombDetonate(arr[i-1].bi); }
         b1.latTgt+=(b1.lat>b2.lat?12:-12);
         b2.latTgt+=(b2.lat>b1.lat?12:-12);
       }
