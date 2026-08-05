@@ -238,6 +238,7 @@
       <button data-d="med">ESTRADEIRO<small>briga honesta</small></button>
       <button data-d="hard">PÉ NA TÁBUA<small>eles não perdoam</small></button>
       <button data-d="ext" class="ext">SEM FREIO<small>boa sorte.</small></button>
+      <button id="b-modfire" style="grid-column:1/3;background:#FBF4E4">🔥 MOD FIRE: OFF<small>o último vira uma bomba ambulante</small></button>
     </div>
     <label for="hroom" id="hroom-label">Pista / sala (todo mundo igual!)</label>
     <div class="plate">
@@ -331,7 +332,7 @@
 'use strict';
 
 /* ================= M1 CONFIG ================= */
-var VER='v2.0.0';
+var VER='v2.1.0';
 var API='https://api.github.com', OWNER='lfcatao-ai', REPO='kart', DIR='s';
 var SALT='racha-mesa-2026';
 var COL={paper:'#F2E8D5',paper2:'#EADDC3',ink:'#2B2620',asphalt:'#57534E',grass:'#8FA65A',
@@ -350,17 +351,17 @@ var TUNE={
   STEP:1/120, MAXFRAME:0.05, MAXSUB:6,
   vmax:340, accelK:1.8, turnRate:2.6, turnSpeedRef:120,
   steerCostThresh:0.5, steerCostMul:0.88,
-  dampLat:8, dampLatDrift:2.5,
-  driftTurnBase:2.2, driftTurnSteer:1.2, driftVmaxMul:0.94, driftBodyAng:0.45,
+  dampLat:8, dampLatDrift:3.5,
+  driftTurnBase:1.6, driftTurnSteer:1.5, driftVmaxMul:0.97, driftBodyAng:0.45,
   driftMinSpeed:150, driftTapWin:0.15, hopT:0.09,
-  turboT:[0.5,1.1,1.9], turboBoost:[70,110,150], turboDur:[0.9,1.2,1.5],
+  turboT:[0.5,1.1,1.9], turboBoost:[70,110,165], turboDur:[0.9,1.2,1.6],
   antiCheeseSteer:0.3, antiCheeseT:0.5,
   padBoost:160, padDur:1.3, launchBoost:130, launchDur:1.0, launchWin:0.15,
   hardCap:560, offVmaxMul:0.45, offDamp:4, wallBounce:0.35,
   stuckV:30, stuckT:1, wrongZoneT:2, laps:3,
   camDamp:8, camZoomDamp:3, camLaDamp:5, camMinV:20,
   pacerA:235, pacerB:260,
-  hwMin:42.5, hwMax:72.5, hwBase:60, minRadius:110
+  hwMin:50, hwMax:82, hwBase:66, minRadius:110
 };
 /* ---- GP: dificuldades, bots, itens ---- */
 var DIFFS={
@@ -926,6 +927,7 @@ function physStep(dt){
   if(d.on) vmaxEff*=TUNE.driftVmaxMul;
   else if(Math.abs(k.steer)>TUNE.steerCostThresh) vmaxEff*=TUNE.steerCostMul;
   if(k.carnT>0) vmaxEff*=1.25;
+  if(k.bombOn) vmaxEff*=1.15; // MOD FIRE: bomba corre atrás
   if(k.slowT>0) vmaxEff*=0.65;
   if(k.offroad&&!(k.carnT>0||k.pimT>0)) vmaxEff*=TUNE.offVmaxMul;
   var boost=0;
@@ -1160,6 +1162,8 @@ function buildRacingLine(tr,diff){
 function gpInit(tr){
   var diff=DIFFS[S.diff]||DIFFS.med;
   GP.on=true; GP.diff=diff;
+  GP.fire=LS.get('racha:modFire')==='1';
+  GP.bombIdx=null;
   buildRacingLine(tr,diff);
   GP.rng=mulberry32(xmur3(tr.seed+'#itens')());
   GP.proj=[]; GP.traps=[]; GP.boxes=[]; GP.bots=[];
@@ -1167,8 +1171,8 @@ function gpInit(tr){
   var pi;
   for(pi=0;pi<4;pi++) GP.proj.push({on:false,d:0,lat:0,tgt:0,life:0,owner:0,rot:0});
   for(pi=0;pi<8;pi++) GP.traps.push({on:false,d:0,lat:0,owner:0});
-  [1,3,5].forEach(function(ci){
-    var d0=(tr.cps[ci]*tr.step+120)%tr.total;
+  [0,1,2,3,4,5].forEach(function(ci){
+    var d0=(tr.cps[ci]*tr.step+(ci===0?320:120))%tr.total;
     var idx=wrapIdx(Math.round(d0/tr.step),tr.n);
     [-0.3,0,0.3].forEach(function(lf){
       GP.boxes.push({d:d0,lat:lf*tr.hw[idx],cool:0});
@@ -1418,6 +1422,7 @@ function botUpdate(b,bi,fdt){
   }
   if(b.slowT>0) vt*=0.65;
   if(b.carnT>0) vt*=1.25;
+  if(GP.bombIdx===bi) vt*=1.15;
   vt+=b.boost;
   if(b.spinT>0){
     b.spinT-=fdt;
@@ -1474,6 +1479,19 @@ function gpUpdate(fdt){
       K.rank=i+1;
     } else GP.bots[e.bi].rank=i+1;
   }
+  // MOD FIRE: o último vivo é a bomba
+  GP.bombIdx=null;
+  K.bombOn=false;
+  if(GP.fire){
+    for(i=7;i>=0;i--){
+      var le=arr[i];
+      if(!le.fin){
+        GP.bombIdx=le.bi;
+        if(le.bi<0) K.bombOn=true;
+        break;
+      }
+    }
+  }
   // desvio de ultrapassagem: vizinho à frente na ordem
   for(i=1;i<8;i++){
     if(arr[i].bi<0) continue;
@@ -1498,7 +1516,8 @@ function gpUpdate(fdt){
       if(item>=0||roul>0) continue;
       var dd=wrapDD(kD(ki)-bx.d,tr.total);
       if(dd>=0&&dd<=40&&Math.abs(kLat(ki)-bx.lat)<20){
-        bx.cool=4;
+        bx.cool=2.5; // regenera rápido: quem vem atrás também pega
+
         if(isP){ K.roulT=1.2; GP.slotDirty=true; EV.push({t:'box'}); }
         else GP.bots[ki].roulT=1.2;
         break;
@@ -1572,6 +1591,18 @@ function gpUpdate(fdt){
       b=GP.bots[i];
       if(b.finished) continue;
       if(dist2(K.x,K.y,b.x,b.y)<26*26){
+        if(K.bombOn){ // MOD FIRE: bomba explode quem tocar
+          if(applyHit(i,1.2,'bomba',-1)){ b.latTgt+=(b.lat>K.lat?34:-34); }
+          continue;
+        }
+        if(GP.bombIdx===i){
+          if(applyHit(-1,1.2,'bomba',i)){
+            var dxb=K.x-b.x, dyb=K.y-b.y, dlb=Math.hypot(dxb,dyb)||1;
+            K.vx+=dxb/dlb*110; K.vy+=dyb/dlb*110;
+          }
+          camShake();
+          continue;
+        }
         if(K.carnT>0){ // derruba + knock 30px; carnaval é imune ao empurrão
           applyHit(i,SPIN_CARN,'carn',-1);
           b.latTgt+=(b.lat>K.lat?30:-30);
@@ -1602,6 +1633,8 @@ function gpUpdate(fdt){
       if(arr[i].bi<0||arr[i-1].bi<0) continue;
       var b1=GP.bots[arr[i].bi], b2=GP.bots[arr[i-1].bi];
       if(Math.abs(arr[i-1].prog-arr[i].prog)<80&&dist2(b1.x,b1.y,b2.x,b2.y)<26*26){
+        if(GP.bombIdx===arr[i].bi) applyHit(arr[i-1].bi,1.2,'bomba',arr[i].bi);
+        else if(GP.bombIdx===arr[i-1].bi) applyHit(arr[i].bi,1.2,'bomba',arr[i-1].bi);
         b1.latTgt+=(b1.lat>b2.lat?12:-12);
         b2.latTgt+=(b2.lat>b1.lat?12:-12);
       }
@@ -1719,6 +1752,7 @@ function gpDrawKarts(c){
     var blink=b.immuneT>0&&b.spinT<=0&&Math.floor(t*8)%2===0;
     var col=SKINS[b.skin];
     if(b.carnT>0) col=SKINS[Math.floor(t*(b.carnT<1.5?3:8))%8]; // 3Hz no fim = aviso
+    if(GP.bombIdx===bi) col=Math.floor(t*6)%2?COL.red:COL.ink; // bomba pulsando
     c.save();
     c.translate(b.x,b.y);
     c.rotate(b.ang);
@@ -2244,6 +2278,7 @@ function renderRace(fdt){
   var hop=K.hopT>0?1+0.18*Math.sin(K.hopT/TUNE.hopT*Math.PI):1;
   var pcol=SKINS[K.skin];
   if(K.carnT>0) pcol=SKINS[Math.floor(S.raceClock*(K.carnT<1.5?3:8))%8];
+  if(K.bombOn) pcol=Math.floor(S.raceClock*6)%2?COL.red:COL.ink;
   var blinkP=K.immuneT>0&&K.spinT<=0&&Math.floor(S.raceClock*8)%2===0;
   c.save();
   c.translate(K.x,K.y);
@@ -2854,8 +2889,14 @@ function drainEV(){
     else if(e.t==='driftstart'){ beep(420,0.06,'square',0.07); }
     else if(e.t==='sector'){ beep(880,0.07,'triangle',0.07); }
     else if(e.t==='lap'){
-      announce('VOLTA '+e.a+'/'+TUNE.laps,true,900);
-      beep(880,0.1,'triangle',0.1); later(function(){ beep(1100,0.12,'triangle',0.1); },110);
+      if(e.a===TUNE.laps&&!S.warmup){
+        announce('ÚLTIMA VOLTA!',false,1300);
+        beep(880,0.1,'triangle',0.12); later(function(){ beep(1320,0.2,'triangle',0.12); },120);
+        vib([30,40,30]);
+      } else {
+        announce('VOLTA '+e.a+'/'+TUNE.laps,true,900);
+        beep(880,0.1,'triangle',0.1); later(function(){ beep(1100,0.12,'triangle',0.1); },110);
+      }
     }
     else if(e.t==='respawn'){ beep(300,0.15,'sawtooth',0.1); later(function(){ beep(220,0.15,'sawtooth',0.1); },140); }
     else if(e.t==='box'){ beep(1200,0.05,'square',0.06); }
@@ -2884,11 +2925,13 @@ function drainEV(){
       GP.bannerT=1.4; GP.bannerCol='var(--paper)';
       GP.bannerTxt=(e.a===-999?'':kTag(e.a)+' TE ACERTOU!')||'RODOU!';
       if(e.b==='oleo') GP.bannerTxt=e.a===-1?'PISOU NA PRÓPRIA MANCHA 🤡':'PRESENTE DO '+kTag(e.a);
+      if(e.b==='bomba'){ GP.bannerTxt='💥 '+kTag(e.a)+' TE EXPLODIU!'; beep(70,0.5,'sawtooth',0.18); }
     }
     else if(e.t==='hitgive'){
       beep(1000,0.12,'triangle',0.1); vib(30);
       GP.bannerT=1.4; GP.bannerCol='var(--gold)';
-      GP.bannerTxt='ACERTOU O '+kTag(e.a)+'!';
+      GP.bannerTxt=(e.b==='bomba'?'💥 EXPLODIU O ':'ACERTOU O ')+kTag(e.a)+'!';
+      if(e.b==='bomba') beep(70,0.5,'sawtooth',0.18);
     }
     else if(e.t==='pos'){
       if(e.a<e.b) beep(1100,0.07,'triangle',0.08);
@@ -3082,6 +3125,17 @@ function boot(){
     }
   })();
   syncModeUI();
+  // MOD FIRE toggle
+  function fireLbl(){
+    var on=LS.get('racha:modFire')==='1';
+    $('b-modfire').innerHTML='🔥 MOD FIRE: '+(on?'ON':'OFF')+'<small>o último vira uma bomba ambulante</small>';
+    $('b-modfire').classList.toggle('sel',on);
+  }
+  $('b-modfire').addEventListener('click',function(){
+    LS.set('racha:modFire',LS.get('racha:modFire')==='1'?'0':'1');
+    fireLbl();
+  });
+  fireLbl();
   // ícone de aviso da chinelada (desenhado 1x)
   (function(){
     var wc=$('warnchin');
