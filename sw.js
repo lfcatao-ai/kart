@@ -6,7 +6,7 @@ self.addEventListener('fetch', function(e){
     e.respondWith(
       fetch(e.request).then(function(r){
         var c = r.clone();
-        caches.open('racha-v2.1').then(function(x){ x.put('./offline', c); });
+        caches.open('racha-v3').then(function(x){ x.put('./offline', c); });
         return r;
       }).catch(function(){ return caches.match('./offline'); })
     );

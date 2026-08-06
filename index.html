@@ -274,6 +274,11 @@
     <div id="presence"></div>
     <p class="statline" id="lb-stat" style="color:rgba(43,38,32,.6)"></p>
     <button class="btn btn-red" id="b-race">Largar 🏁</button>
+    <div class="plate" style="gap:8px;margin-top:14px">
+      <button class="btn btn-line mini" id="b-duel-host" style="flex:1;width:auto">⚔️ Criar duelo</button>
+      <button class="btn btn-line mini" id="b-duel-join" style="flex:1;width:auto">⚔️ Entrar</button>
+    </div>
+    <p class="statline" id="duel-stat" style="color:var(--red)"></p>
     <button class="btn btn-line" id="b-lb-rank">🏆 Ver ranking</button>
   </div></div>
 
@@ -332,7 +337,7 @@
 'use strict';
 
 /* ================= M1 CONFIG ================= */
-var VER='v2.2.0';
+var VER='v3.0.0';
 var API='https://api.github.com', OWNER='lfcatao-ai', REPO='kart', DIR='s';
 var SALT='racha-mesa-2026';
 var COL={paper:'#F2E8D5',paper2:'#EADDC3',ink:'#2B2620',asphalt:'#57534E',grass:'#8FA65A',
@@ -2287,6 +2292,7 @@ function renderRace(fdt){
   for(i=0;i<S.pacers.length;i++) drawGhost(c,S.pacers[i],'#8a8378');
   if(S.ghostPlay) drawGhost(c,S.ghostPlay,SKINS[K.skin]);
   for(i=0;i<S.rivals.length;i++) drawGhost(c,S.rivals[i],S.rivals[i].col||'#8a8378');
+  if(DUEL.on) duelDrawRemote(c);
   // kart do jogador
   var bodyAng=K.dir+(K.drift.on?K.drift.side*TUNE.driftBodyAng:0)+0.12*K.steer;
   if(K.spinT>0) bodyAng+=TAU*2*(1-K.spinT/K.spinDur)*K.spinDir;
@@ -2613,6 +2619,212 @@ function putPresence(){
   });
 }
 
+
+/* ================= M17c DUELO 1×1 (WebRTC P2P; GitHub só no handshake) ================= */
+var DUEL={on:false,pc:null,dc:null,isHost:false,status:'',pollIv:null,
+  remote:{active:false,name:'',skin:0,x:0,y:0,dir:0,px:0,py:0,pdir:0,at:0,pat:0,spin:false,finMs:0},
+  sendT:0,peerName:'',myFinSent:false,result:null};
+function duelPath(h){ return DIR+'/'+S.room+'__D__'+(h?'H':'G')+'.json'; }
+function duelStatus(t){ DUEL.status=t; var el=$('duel-stat'); if(el) el.textContent=t; }
+function putJsonSha(path,obj,cb){
+  fetch(API+'/repos/'+OWNER+'/'+REPO+'/contents/'+path+'?ts='+Date.now(),{headers:hdr(),cache:'no-store'})
+    .then(function(r){ return r.ok?r.json():null; })
+    .then(function(f){ putJson(path,obj,f&&f.sha?f.sha:null,cb); })
+    .catch(function(){ putJson(path,obj,null,cb); });
+}
+function getJson(path,cb){
+  fetch(API+'/repos/'+OWNER+'/'+REPO+'/contents/'+path+'?ts='+Date.now(),{headers:hdr(),cache:'no-store'})
+    .then(function(r){ if(!r.ok) throw 0; return r.json(); })
+    .then(function(f){ cb(JSON.parse(b64d(f.content))); })
+    .catch(function(){ cb(null); });
+}
+function duelCleanupFiles(){
+  [true,false].forEach(function(h){
+    var p=duelPath(h);
+    fetch(API+'/repos/'+OWNER+'/'+REPO+'/contents/'+p+'?ts='+Date.now(),{headers:hdr(),cache:'no-store'})
+      .then(function(r){ return r.ok?r.json():null; })
+      .then(function(f){ if(f&&f.sha) delFile(p,f.sha); })
+      .catch(function(){});
+  });
+}
+function duelReset(){
+  if(DUEL.pollIv){ clearInterval(DUEL.pollIv); DUEL.pollIv=null; }
+  try{ if(DUEL.dc) DUEL.dc.close(); }catch(e){}
+  try{ if(DUEL.pc) DUEL.pc.close(); }catch(e){}
+  DUEL.pc=null; DUEL.dc=null; DUEL.on=false;
+  DUEL.remote.active=false; DUEL.myFinSent=false; DUEL.result=null;
+  DUEL.remote.finMs=0;
+}
+function duelNewPc(){
+  var pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+  return pc;
+}
+function duelWaitIce(pc){
+  return new Promise(function(res){
+    if(pc.iceGatheringState==='complete'){ res(); return; }
+    var to=setTimeout(res,3500); // não espera pra sempre
+    pc.addEventListener('icegatheringstatechange',function(){
+      if(pc.iceGatheringState==='complete'){ clearTimeout(to); res(); }
+    });
+  });
+}
+function duelBindDc(dc){
+  DUEL.dc=dc;
+  dc.onopen=function(){
+    DUEL.on=true;
+    duelStatus('⚔️ conectado com '+(DUEL.peerName||'o rival')+'!');
+    dc.send(JSON.stringify({t:'hi',name:S.name,skin:S.skin}));
+    if(DUEL.isHost){
+      later(function(){ duelGo(); },600);
+    }
+  };
+  dc.onmessage=function(ev){
+    var m;
+    try{ m=JSON.parse(ev.data); }catch(e){ return; }
+    if(m.t==='hi'){
+      DUEL.peerName=slugName(m.name)||'RIVAL';
+      DUEL.remote.name=DUEL.peerName;
+      DUEL.remote.skin=clamp(+(m.skin||0),0,7);
+      duelStatus('⚔️ conectado com '+DUEL.peerName+'!');
+    }
+    else if(m.t==='go'){ duelStartRace(m.round); }
+    else if(m.t==='p'){
+      var r=DUEL.remote;
+      r.px=r.x; r.py=r.y; r.pdir=r.dir; r.pat=r.at;
+      r.x=m.x; r.y=m.y; r.dir=m.d; r.spin=!!m.s;
+      r.at=performance.now();
+      r.active=true;
+    }
+    else if(m.t==='fin'){
+      DUEL.remote.finMs=m.ms;
+      duelCheckResult();
+    }
+  };
+  dc.onclose=function(){
+    if(DUEL.on){ DUEL.on=false; DUEL.remote.active=false; duelStatus('duelo desconectou'); }
+  };
+}
+function duelHost(){
+  if(!TOKEN){ duelStatus('precisa do token pro duelo'); return; }
+  duelReset(); DUEL.isHost=true;
+  duelStatus('criando duelo… (manda o outro apertar ENTRAR)');
+  var pc=duelNewPc(); DUEL.pc=pc;
+  duelBindDc(pc.createDataChannel('race',{ordered:false,maxRetransmits:0}));
+  pc.createOffer().then(function(o){ return pc.setLocalDescription(o); })
+    .then(function(){ return duelWaitIce(pc); })
+    .then(function(){
+      putJsonSha(duelPath(true),{sdp:pc.localDescription.sdp,type:'offer',name:S.name,at:Date.now()},function(ok){
+        if(!ok){ duelStatus('falhou ao publicar o convite'); return; }
+        duelStatus('convite no ar — esperando o rival…');
+        DUEL.pollIv=setInterval(function(){
+          getJson(duelPath(false),function(j){
+            if(j&&j.sdp&&!pc.currentRemoteDescription){
+              clearInterval(DUEL.pollIv); DUEL.pollIv=null;
+              DUEL.peerName=slugName(j.name)||'RIVAL';
+              pc.setRemoteDescription({type:'answer',sdp:j.sdp}).catch(function(){ duelStatus('falha na conexão'); });
+              duelStatus('conectando…');
+            }
+          });
+        },2000);
+      });
+    }).catch(function(){ duelStatus('WebRTC indisponível neste navegador'); });
+}
+function duelJoin(){
+  if(!TOKEN){ duelStatus('precisa do token pro duelo'); return; }
+  duelReset(); DUEL.isHost=false;
+  duelStatus('procurando convite na sala…');
+  var tries=0;
+  DUEL.pollIv=setInterval(function(){
+    tries++;
+    if(tries>15){ clearInterval(DUEL.pollIv); DUEL.pollIv=null; duelStatus('ninguém criou duelo nesta sala'); return; }
+    getJson(duelPath(true),function(j){
+      if(!j||!j.sdp||DUEL.pc) return;
+      if(Date.now()-(j.at||0)>120000){ duelStatus('convite velho — pede pra criar de novo'); return; }
+      clearInterval(DUEL.pollIv); DUEL.pollIv=null;
+      DUEL.peerName=slugName(j.name)||'RIVAL';
+      var pc=duelNewPc(); DUEL.pc=pc;
+      pc.ondatachannel=function(ev){ duelBindDc(ev.channel); };
+      pc.setRemoteDescription({type:'offer',sdp:j.sdp})
+        .then(function(){ return pc.createAnswer(); })
+        .then(function(a){ return pc.setLocalDescription(a); })
+        .then(function(){ return duelWaitIce(pc); })
+        .then(function(){
+          putJsonSha(duelPath(false),{sdp:pc.localDescription.sdp,type:'answer',name:S.name,at:Date.now()},function(ok){
+            duelStatus(ok?'respondendo o convite — conectando…':'falhou ao responder');
+          });
+        }).catch(function(){ duelStatus('falha na conexão'); });
+    });
+  },2000);
+}
+function duelGo(){
+  if(!DUEL.on||!DUEL.dc) return;
+  refresh(function(){
+    var rd=myNextRound();
+    try{ DUEL.dc.send(JSON.stringify({t:'go',round:rd})); }catch(e){}
+    duelStartRace(rd);
+  });
+}
+function duelStartRace(round){
+  if(S.state==='RACE'||S.state==='COUNTDOWN') return;
+  S.round=round;
+  duelCleanupFiles();
+  raceInit(S.room+'#R'+round,false);
+  go('COUNTDOWN');
+}
+function duelTick(fdt){
+  if(!DUEL.on||!DUEL.dc||DUEL.dc.readyState!=='open') return;
+  DUEL.sendT-=fdt;
+  if(DUEL.sendT<=0&&S.state==='RACE'&&!S.paused){
+    DUEL.sendT=0.066; // ~15Hz
+    try{
+      DUEL.dc.send(JSON.stringify({t:'p',x:Math.round(K.x),y:Math.round(K.y),
+        d:Math.round(K.dir*100)/100,s:K.spinT>0?1:0}));
+    }catch(e){}
+  }
+}
+function duelSendFin(ms){
+  if(!DUEL.on||DUEL.myFinSent) return;
+  DUEL.myFinSent=true;
+  try{ DUEL.dc.send(JSON.stringify({t:'fin',ms:ms})); }catch(e){}
+  duelCheckResult();
+}
+function duelCheckResult(){
+  if(!DUEL.myFinSent||!DUEL.remote.finMs||!S.resultRec) return;
+  var my=S.resultRec.ms, other=DUEL.remote.finMs;
+  var win=my<other;
+  var d=Math.abs(my-other)/1000;
+  DUEL.result={win:win,d:d};
+  var el=$('rs-faltou');
+  if(el&&S.state==='RESULT'){
+    el.textContent=win?('VENCEU O DUELO! +'+d.toFixed(1)+'s NO '+DUEL.peerName):
+      ('O '+DUEL.peerName+' TE PEGOU POR '+d.toFixed(1)+'s');
+  }
+}
+function duelDrawRemote(c){
+  var r=DUEL.remote;
+  if(!r.active) return;
+  // extrapola do último pacote pela velocidade estimada (cap 150ms)
+  var now=performance.now();
+  var span=Math.max(30,r.at-r.pat);
+  var vx=(r.x-r.px)/span, vy=(r.y-r.py)/span;
+  var ahead=Math.min(150,now-r.at);
+  var x=r.x+vx*ahead, y=r.y+vy*ahead;
+  var dir=r.dir;
+  c.save();
+  c.translate(x,y);
+  c.rotate(dir+(r.spin?(now/60)%TAU:0));
+  drawKartVector(c,SKINS[r.skin],1,0,0,null,r.skin+1);
+  c.restore();
+  c.save();
+  c.translate(x,y);
+  c.rotate(Math.PI/2+cam.ang);
+  c.font="800 11px Rubik,sans-serif";
+  c.textAlign='center';
+  c.fillStyle=COL.ink;
+  c.fillText('⚔ '+(r.name||'RIVAL'),0,-24);
+  c.restore();
+}
+
 /* ---- render das telas com dados ---- */
 function renderNet(){
   if(S.state==='LOBBY') renderLobby();
@@ -2680,6 +2892,7 @@ function sumSector(sec,i){
   return c?t:null;
 }
 function renderFaltou(){
+  if(DUEL.on&&DUEL.result) return; // mensagem do duelo tem prioridade
   var rec=S.resultRec;
   if(!rec) return;
   var board=roundBoard(rec.round);
@@ -2724,6 +2937,7 @@ function go(next){
   var scrs=document.querySelectorAll('.scr');
   for(var i=0;i<scrs.length;i++) scrs[i].classList.remove('on');
   $('pauseov').className='';
+  if(next==='HOME'&&DUEL.pc) duelReset();
   S.state=next;
   var scr=SCREENS[next];
   if(scr){ $(scr).classList.add('on'); window.scrollTo(0,0); }
@@ -2840,6 +3054,7 @@ function finishRace(){
     drift:driftScore(),clean:K.clean,launch:K.launch,
     ghost:S.ghostRec?S.ghostRec.b64():''};
   S.resultRec=rec;
+  duelSendFin(rec.ms);
   var isPB=!S.pbRec||rec.ms<S.pbRec.ms;
   if(isPB) LS.set('racha:pb:'+seed,JSON.stringify(rec));
   rec.isPB=isPB;
@@ -2877,6 +3092,7 @@ function fillResult(){
   bar.style.animation='adv 6s linear forwards';
   later(function(){ if(S.state==='RESULT') go('RANK'); },6000);
   renderFaltou();
+  if(DUEL.on) duelCheckResult();
 }
 function startFlow(){
   var n=slugName($('hname').value), r=slug($('hroom').value);
@@ -3032,6 +3248,7 @@ function frame(t){
     engineUpdate();
     hudUpdate();
   }
+  duelTick(fdt);
   if(GP.on&&S.state==='RACE'&&!S.paused){
     if(S.finished) S.raceClock+=fdt; // bots seguem no relógio real até o finishRace
     gpUpdate(fdt);
@@ -3215,7 +3432,16 @@ function boot(){
     go('RANK');
   });
   $('b-lb-home').addEventListener('click',function(){ go('HOME'); });
-  $('b-race').addEventListener('click',function(){ startRoundRace(); });
+  $('b-race').addEventListener('click',function(){
+    if(DUEL.on){
+      if(DUEL.isHost) duelGo();
+      else duelStatus('espera o host largar — vocês saem juntos');
+      return;
+    }
+    startRoundRace();
+  });
+  $('b-duel-host').addEventListener('click',function(){ duelHost(); });
+  $('b-duel-join').addEventListener('click',function(){ duelJoin(); });
   $('b-lb-rank').addEventListener('click',function(){ go('RANK'); });
   $('b-rs-rank').addEventListener('click',function(){ go('RANK'); });
   $('b-rs-again').addEventListener('click',function(){ startRoundRace(); });
@@ -3287,6 +3513,7 @@ var API_TEST={buildTrack:buildTrack,project:project,sampleAt:sampleAt,curvAhead:
   GhostRec:GhostRec,GhostPlay:GhostPlay,makePacer:makePacer,chk4:chk4,
   slug:slug,slugName:slugName,wrapIdx:wrapIdx,angWrap:angWrap,
   RX_SCORE:RX_SCORE,RX_PRES:RX_PRES,TUNE:TUNE,S:S,fmtMs2:fmtMs2,
+  DUEL:DUEL,duelBindDc:duelBindDc,duelNewPc:duelNewPc,duelWaitIce:duelWaitIce,duelStartRace:duelStartRace,
   kart:function(){return K;},track:function(){return TRACK;},input:function(){return IN;}};
 if(typeof window!=='undefined') window.RACHA=API_TEST;
 else if(typeof globalThis!=='undefined') globalThis.RACHA=API_TEST;
