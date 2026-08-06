@@ -332,7 +332,7 @@
 'use strict';
 
 /* ================= M1 CONFIG ================= */
-var VER='v2.1.1';
+var VER='v2.2.0';
 var API='https://api.github.com', OWNER='lfcatao-ai', REPO='kart', DIR='s';
 var SALT='racha-mesa-2026';
 var COL={paper:'#F2E8D5',paper2:'#EADDC3',ink:'#2B2620',asphalt:'#57534E',grass:'#8FA65A',
@@ -2286,6 +2286,7 @@ function renderRace(fdt){
   // ghosts
   for(i=0;i<S.pacers.length;i++) drawGhost(c,S.pacers[i],'#8a8378');
   if(S.ghostPlay) drawGhost(c,S.ghostPlay,SKINS[K.skin]);
+  for(i=0;i<S.rivals.length;i++) drawGhost(c,S.rivals[i],S.rivals[i].col||'#8a8378');
   // kart do jogador
   var bodyAng=K.dir+(K.drift.on?K.drift.side*TUNE.driftBodyAng:0)+0.12*K.steer;
   if(K.spinT>0) bodyAng+=TAU*2*(1-K.spinT/K.spinDur)*K.spinDir;
@@ -2367,6 +2368,10 @@ function mmDraw(){
     if(p) mmPoint(c,p.x,p.y,'#8a8378',3);
   }
   if(S.ghostPlay&&S.ghostPlay.posCache) mmPoint(c,S.ghostPlay.posCache.x,S.ghostPlay.posCache.y,'rgba(43,38,32,.5)',3);
+  for(var rv2=0;rv2<S.rivals.length;rv2++){
+    var rp=S.rivals[rv2].posCache;
+    if(rp) mmPoint(c,rp.x,rp.y,S.rivals[rv2].col||'#8a8378',3.5);
+  }
   if(GP.on){
     for(var gb=0;gb<GP.bots.length;gb++){
       var bb=GP.bots[gb];
@@ -2575,6 +2580,25 @@ function publishPB(rec,cb){
     });
   });
 }
+/* fantasmas dos rivais: baixa o replay dos 2 melhores da rodada (mesma pista) */
+function loadRivals(seed){
+  if(!TOKEN) return;
+  var others=roomScores().filter(function(s2){ return s2.round===S.round&&s2.name!==S.name; });
+  others.sort(function(a,b){ return a.ms-b.ms; });
+  others.slice(0,2).forEach(function(e){
+    fetch(API+'/repos/'+OWNER+'/'+REPO+'/contents/'+e.path+'?ts='+Date.now(),{headers:hdr(),cache:'no-store'})
+      .then(function(r){ if(!r.ok) throw 0; return r.json(); })
+      .then(function(f){
+        var j=JSON.parse(b64d(f.content));
+        if(j.seed!==seed||!j.ghost) return;
+        if(S.state!=='RACE'&&S.state!=='COUNTDOWN') return;
+        var gpv=new GhostPlay(j.ghost);
+        gpv.name=e.name;
+        gpv.col=SKINS[clamp(+(j.skin||0),0,7)];
+        S.rivals.push(gpv);
+      }).catch(function(){});
+  });
+}
 function putPresence(){
   if(!TOKEN||!S.room||!S.name) return;
   var path=DIR+'/'+S.room+'__J__'+S.name+'.json';
@@ -2740,6 +2764,7 @@ function raceInit(seed,warmup){
   S.launchArmed=true; S.lastLaunchTap=-1e9; S.goWall=0;
   cam.ang=K.dir; cam.zoom=1; cam.laX=0; cam.laY=0; cam.snap=true; cam.shakeT=0; cam.boostT=0;
   var gpMode=S.mode==='GP'&&!warmup;
+  S.rivals=[];
   S.ghostRec=(warmup||gpMode)?null:new GhostRec();
   S.ghostPlay=null; S.pacers=[]; S.refGhost=null; S.refDelta=null;
   gpReset();
@@ -2755,6 +2780,7 @@ function raceInit(seed,warmup){
     S.pacers=[makePacer(TRACK,TUNE.pacerA,'COELHO'),makePacer(TRACK,TUNE.pacerB,'LEBRE')];
     S.refGhost=S.ghostPlay||S.pacers[0];
     S.refState={prog:0,prevD:TRACK.startIdx*TRACK.step,hint:TRACK.startIdx};
+    loadRivals(seed);
   }
   // HUD zerado já no countdown (senão mostra a corrida anterior)
   hud.lap=hud.time=hud.delta=hud.deltaCls='@';
@@ -2988,6 +3014,7 @@ function frame(t){
     // ghosts
     for(var i=0;i<S.pacers.length;i++) S.pacers[i].posCache=S.pacers[i].pos(S.raceClock);
     if(S.ghostPlay) S.ghostPlay.posCache=S.ghostPlay.pos(S.raceClock);
+    for(var rv=0;rv<S.rivals.length;rv++) S.rivals[rv].posCache=S.rivals[rv].pos(S.raceClock);
     // delta vs referência
     if(S.refGhost){
       var refProg=null;
